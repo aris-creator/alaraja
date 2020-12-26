@@ -2,6 +2,7 @@ var util = require('./util')
 var slice = util.slice
 var pluck = util.pluck
 var each = util.each
+var bind = util.bind
 var create = util.create
 var isList = util.isList
 var isFunction = util.isFunction
@@ -11,11 +12,12 @@ module.exports = {
 	createStore: createStore,
 }
 
+var seenNamespaces = {}
+
 var storeAPI = {
 	version: '2.0.4',
 	enabled: false,
-	storage: null,
-
+	
 	// addStorage adds another storage to this store. The store
 	// will use the first storage it receives that is enabled, so
 	// call addStorage in the order of preferred storage.
@@ -24,7 +26,6 @@ var storeAPI = {
 		if (this._testStorage(storage)) {
 			this._storage.resolved = storage
 			this.enabled = true
-			this.storage = storage.name
 		}
 	},
 
@@ -71,7 +72,7 @@ var storeAPI = {
 	// get returns the value of the given key. If that value
 	// is undefined, it returns optionalDefaultValue instead.
 	get: function(key, optionalDefaultValue) {
-		var data = this._storage().read(this._namespacePrefix + key)
+		var data = this._storage().read(this._namespacedKey(key))
 		return this._deserialize(data, optionalDefaultValue)
 	},
 
@@ -81,13 +82,17 @@ var storeAPI = {
 		if (value === undefined) {
 			return this.remove(key)
 		}
-		this._storage().write(this._namespacePrefix + key, this._serialize(value))
+		this._storage().write(this._namespacedKey(key), this._serialize(value))
 		return value
 	},
 
 	// remove deletes the key and value stored at the given key.
 	remove: function(key) {
-		this._storage().remove(this._namespacePrefix + key)
+		this._storage().remove(this._namespacedKey(key))
+	},
+	
+	_namespacedKey: function(key) {
+		return this._namespacePrefix + (this._parent ? this._parent._namespacedKey(key) : key)
 	},
 
 	// each will call the given callback once for each key-value pair
@@ -95,7 +100,7 @@ var storeAPI = {
 	each: function(callback) {
 		var self = this
 		this._storage().each(function(val, namespacedKey) {
-			callback(self._deserialize(val), namespacedKey.replace(self._namespaceRegexp, ''))
+			callback.call(self, self._deserialize(val), (namespacedKey || '').replace(self._namespaceRegexp, ''))
 		})
 	},
 
@@ -107,22 +112,18 @@ var storeAPI = {
 	// additional functionality that can't live in plugins
 	// ---------------------------------------------------
 
-	// hasNamespace returns true if this store instance has the given namespace.
-	hasNamespace: function(namespace) {
-		return (this._namespacePrefix == '__storejs_'+namespace+'_')
-	},
-
 	// namespace clones the current store and assigns it the given namespace
 	namespace: function(namespace) {
 		if (!this._legalNamespace.test(namespace)) {
 			throw new Error('store.js namespaces can only have alhpanumerics + underscores and dashes')
 		}
-		// create a prefix that is very unlikely to collide with un-namespaced keys
-		var namespacePrefix = '__storejs_'+namespace+'_'
-		return create(this, {
-			_namespacePrefix: namespacePrefix,
-			_namespaceRegexp: namespacePrefix ? new RegExp('^'+namespacePrefix) : null
-		})
+		return createStore([this._storage.resolved], this._seenPlugins, namespace, this)
+	},
+	namespaceRaw: function(namespace) {
+		if (!this._legalNamespace.test(namespace)) {
+			throw new Error('store.js namespaces can only have alhpanumerics + underscores and dashes')
+		}
+		return createStore([this._storage.resolved], null, namespace, this)
 	},
 
 	// createStore creates a store.js instance with the first
@@ -133,11 +134,18 @@ var storeAPI = {
 	},
 }
 
-function createStore(storages, plugins) {
+function createStore(storages, plugins, namespace, parent) {
+	namespace = (namespace ? '__ns__'+namespace : '')
+	// if (namespace && seenNamespaces[namespace]) {
+	// 	throw new Error('namespace is already in use: '+namespace)
+	// }
+	// seenNamespaces[namespace] = true
+
 	var _privateStoreProps = {
+		_parent: parent,
 		_seenPlugins: [],
-		_namespacePrefix: '',
-		_namespaceRegexp: null,
+		_namespacePrefix: namespace,
+		_namespaceRegexp: namespace ? new RegExp('^'+namespace) : null,
 		_legalNamespace: /^[a-zA-Z0-9_\-]+$/, // alpha-numeric + underscore and dash
 
 		_storage: function() {
@@ -178,7 +186,7 @@ function createStore(storages, plugins) {
 					return oldFn.apply(self, args)
 				}
 
-				// Give mixing function access to super_fn by prefixing all mixin function
+				// Give mixin function access to super_fn by prefixing all mixin function
 				// arguments with super_fn.
 				var newFnArgs = [super_fn].concat(args)
 
@@ -206,6 +214,10 @@ function createStore(storages, plugins) {
 	}
 
 	var store = create(_privateStoreProps, storeAPI)
+	store.raw = {}
+	each(store, function(prop, propName) {
+		store.raw[propName] = bind(store, prop)
+	})
 	each(storages, function(storage) {
 		store.addStorage(storage)
 	})
